@@ -376,6 +376,25 @@ func startClineCore(corePort, hostPort int) (*exec.Cmd, error) {
 		fmt.Printf("Starting cline-core on port %d (with hostbridge on %d)\n", corePort, hostPort)
 	}
 
+	var finalClineCorePath string
+	var finalInstallDir string
+
+	if corePathOverride := os.Getenv("CLINE_CORE_PATH"); corePathOverride != "" {
+		absCorePath, err := filepath.Abs(corePathOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve CLINE_CORE_PATH: %w", err)
+		}
+		if _, err := os.Stat(absCorePath); err != nil {
+			return nil, fmt.Errorf("CLINE_CORE_PATH not found at %q: %w", absCorePath, err)
+		}
+
+		finalClineCorePath = absCorePath
+		finalInstallDir = filepath.Dir(absCorePath)
+		if Config.Verbose {
+			fmt.Printf("Using CLINE_CORE_PATH override: %s\n", finalClineCorePath)
+		}
+	} else {
+
 	// Get the executable path and resolve symlinks (for npm global installs)
 	execPath, err := os.Executable()
 	if err != nil {
@@ -409,8 +428,6 @@ func startClineCore(corePort, hostPort int) (*exec.Cmd, error) {
 	}
 
 	// Check if cline-core.js exists at the primary location
-	var finalClineCorePath string
-	var finalInstallDir string
 	if _, err := os.Stat(clineCorePath); os.IsNotExist(err) {
 		// Development mode: Try ../../dist-standalone/cline-core.js
 		// This handles the case where we're running from cli/bin/cline
@@ -436,6 +453,7 @@ func startClineCore(corePort, hostPort int) (*exec.Cmd, error) {
 		if Config.Verbose {
 			fmt.Printf("Using production mode: cline-core.js found at %s\n", finalClineCorePath)
 		}
+	}
 	}
 
 	// Create logs directory in ~/.cline/logs

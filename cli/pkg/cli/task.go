@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/cline/cli/pkg/cli/config"
 	"github.com/cline/cli/pkg/cli/global"
 	"github.com/cline/cli/pkg/cli/task"
@@ -46,6 +48,7 @@ func NewTaskCommand() *cobra.Command {
 	cmd.AddCommand(newTaskListCommand())
 	cmd.AddCommand(newTaskOpenCommand())
 	cmd.AddCommand(newTaskRestoreCommand())
+	cmd.AddCommand(newTaskDeleteCommand())
 
 	return cmd
 }
@@ -572,6 +575,89 @@ func newTaskRestoreCommand() *cobra.Command {
 
 	cmd.Flags().StringVarP(&restoreType, "type", "t", "task", "Restore type (task, workspace, taskAndWorkspace)")
 	cmd.Flags().StringVar(&address, "address", "", "specific Cline instance address to use")
+
+	return cmd
+}
+
+func newTaskDeleteCommand() *cobra.Command {
+	var (
+		force bool
+		all   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:     "delete <task-id>",
+		Aliases: []string{"d", "del", "rm"},
+		Short:   "Delete a task by ID",
+		Long:    "Delete a task and remove its local history and files.",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if all {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var ids []string
+			if all {
+				var err error
+				ids, err = task.GetTaskHistoryIDsFromDisk()
+				if err != nil {
+					return err
+				}
+			} else {
+				ids = []string{args[0]}
+			}
+
+			if len(ids) == 0 {
+				fmt.Println("No tasks to delete.")
+				return nil
+			}
+
+			if !force {
+				var confirm bool
+				title := "Are you sure you want to delete this task?"
+				desc := "This will remove the task from history and delete its local files. This action cannot be undone."
+				if len(ids) > 1 {
+					title = fmt.Sprintf("Are you sure you want to delete %d tasks?", len(ids))
+				}
+
+				form := huh.NewForm(
+					huh.NewGroup(
+						huh.NewConfirm().Title(title).Description(desc).Value(&confirm),
+					),
+				)
+				if err := form.Run(); err != nil {
+					return fmt.Errorf("failed to confirm delete: %w", err)
+				}
+				if !confirm {
+					return nil
+				}
+			}
+
+			summary, err := task.DeleteTasksFromDisk(ids)
+			if err != nil {
+				return err
+			}
+
+			switch global.Config.OutputFormat {
+			case "json":
+				b, _ := json.MarshalIndent(summary, "", "  ")
+				fmt.Println(string(b))
+			case "plain":
+				fmt.Printf("Deleted %d task(s)\n", summary.HistoryItemsRemoved)
+			default:
+				fmt.Printf("Deleted %d task(s)\n", summary.HistoryItemsRemoved)
+				if len(summary.HistoryItemsNotFound) > 0 {
+					fmt.Printf("Not found in history: %s\n", strings.Join(summary.HistoryItemsNotFound, ", "))
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "delete without confirmation")
+	cmd.Flags().BoolVar(&all, "all", false, "delete all tasks")
 
 	return cmd
 }

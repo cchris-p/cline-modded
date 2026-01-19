@@ -364,3 +364,24 @@ func (lm *LockManager) WithFileLock(filePath, heldBy string, fn func() error) er
 
 	return fn()
 }
+
+// RemoveFolderLock removes a folder lock by target
+func (lm *LockManager) RemoveFolderLock(lockTarget string) (int, error) {
+	if err := lm.ensureConnection(); err != nil {
+		return 0, nil
+	}
+
+	res, err := lm.db.Exec(
+		`DELETE FROM locks WHERE lock_type = 'folder' AND lock_target = ?`,
+		lockTarget,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to remove folder lock: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return int(rows), nil
+}
