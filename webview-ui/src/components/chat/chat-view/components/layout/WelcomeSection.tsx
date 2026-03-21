@@ -1,14 +1,20 @@
 import { BANNER_DATA, BannerAction, BannerActionType, BannerCardData } from "@shared/cline/banner"
-import React, { useCallback, useEffect, useMemo, useState } from "react"
+import { EmptyRequest } from "@shared/proto/cline/common"
+import type { Worktree } from "@shared/proto/cline/worktree"
+import { TrackWorktreeViewOpenedRequest } from "@shared/proto/cline/worktree"
+import { GitBranch } from "lucide-react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import BannerCarousel from "@/components/common/BannerCarousel"
 import WhatsNewModal from "@/components/common/WhatsNewModal"
 import HistoryPreview from "@/components/history/HistoryPreview"
 import { useApiConfigurationHandlers } from "@/components/settings/utils/useApiConfigurationHandlers"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import HomeHeader from "@/components/welcome/HomeHeader"
 import { SuggestedTasks } from "@/components/welcome/SuggestedTasks"
+import CreateWorktreeModal from "@/components/worktrees/CreateWorktreeModal"
 import { useClineAuth } from "@/context/ClineAuthContext"
 import { useExtensionState } from "@/context/ExtensionStateContext"
-import { AccountServiceClient, StateServiceClient, UiServiceClient } from "@/services/grpc-client"
+import { AccountServiceClient, StateServiceClient, UiServiceClient, WorktreeServiceClient } from "@/services/grpc-client"
 import { convertBannerData } from "@/utils/bannerUtils"
 import { getCurrentPlatform } from "@/utils/platformUtils"
 import { WelcomeSectionProps } from "../../types/chatTypes"
@@ -25,36 +31,109 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 	taskHistory,
 	shouldShowQuickWins,
 }) => {
-	const { lastDismissedInfoBannerVersion, lastDismissedCliBannerVersion, lastDismissedModelBannerVersion } = useExtensionState()
+	const { lastDismissedInfoBannerVersion, lastDismissedCliBannerVersion, lastDismissedModelBannerVersion, dismissedBanners } =
+		useExtensionState()
 
 	// Track if we've shown the "What's New" modal this session
 	const [hasShownWhatsNewModal, setHasShownWhatsNewModal] = useState(false)
 	const [showWhatsNewModal, setShowWhatsNewModal] = useState(false)
+	const bannerWaitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+	// Quick launch worktree modal
+	const [showCreateWorktreeModal, setShowCreateWorktreeModal] = useState(false)
+	const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
+	const [currentWorktree, setCurrentWorktree] = useState<Worktree | null>(null)
+
+	// Check if we're in a git repo and get current worktree info on mount
+	useEffect(() => {
+		WorktreeServiceClient.listWorktrees(EmptyRequest.create({}))
+			.then((result) => {
+				const canUseWorktrees = result.isGitRepo && !result.isMultiRoot && !result.isSubfolder
+				setIsGitRepo(canUseWorktrees)
+				if (canUseWorktrees) {
+					const current = result.worktrees.find((w) => w.isCurrent)
+					setCurrentWorktree(current || null)
+				}
+			})
+			.catch(() => setIsGitRepo(false))
+	}, [])
 
 	const { clineUser } = useClineAuth()
-	const { openRouterModels, setShowChatModelSelector, navigateToSettings, subagentsEnabled, banners } = useExtensionState()
+	const {
+		openRouterModels,
+		navigateToSettings,
+		navigateToSettingsModelPicker,
+		navigateToWorktrees,
+		worktreesEnabled,
+		banners,
+		welcomeBanners,
+	} = useExtensionState()
 	const { handleFieldsChange } = useApiConfigurationHandlers()
 
-	// Show modal when there's a new announcement and we haven't shown it this session
+	// Show modal when there's a new announcement and we haven't shown it this session.
+	// We delay opening slightly to wait for welcome banners from the backend API,
+	// which are fetched asynchronously and may not be available on the first state push.
+	// The modal opens immediately if banners arrive, or after a 3s timeout as fallback.
 	useEffect(() => {
-		if (showAnnouncement && !hasShownWhatsNewModal) {
+		if (showAnnouncement && !hasShownWhatsNewModal && !bannerWaitTimeoutRef.current) {
+			bannerWaitTimeoutRef.current = setTimeout(() => {
+				bannerWaitTimeoutRef.current = null
+				setShowWhatsNewModal(true)
+				setHasShownWhatsNewModal(true)
+			}, 3000)
+		}
+		return () => {
+			if (bannerWaitTimeoutRef.current) {
+				clearTimeout(bannerWaitTimeoutRef.current)
+				bannerWaitTimeoutRef.current = null
+			}
+		}
+	}, [showAnnouncement, hasShownWhatsNewModal])
+
+	// Open modal early if welcome banners arrive before the timeout
+	useEffect(() => {
+		if (bannerWaitTimeoutRef.current && welcomeBanners && welcomeBanners.length > 0) {
+			if (bannerWaitTimeoutRef.current) {
+				clearTimeout(bannerWaitTimeoutRef.current)
+				bannerWaitTimeoutRef.current = null
+			}
 			setShowWhatsNewModal(true)
 			setHasShownWhatsNewModal(true)
 		}
-	}, [showAnnouncement, hasShownWhatsNewModal])
+	}, [welcomeBanners])
 
 	const handleCloseWhatsNewModal = useCallback(() => {
 		setShowWhatsNewModal(false)
 		// Call hideAnnouncement to persist dismissal (same as old banner behavior)
 		hideAnnouncement()
-	}, [hideAnnouncement])
+		if (welcomeBanners && welcomeBanners.length > 0) {
+			for (const banner of welcomeBanners) {
+				StateServiceClient.dismissBanner({ value: banner.id }).catch(console.error)
+			}
+		}
+	}, [hideAnnouncement, welcomeBanners])
+
+	// Handle click on home page worktree element with telemetry
+	const handleWorktreeClick = useCallback(() => {
+		WorktreeServiceClient.trackWorktreeViewOpened(TrackWorktreeViewOpenedRequest.create({ source: "home_page" })).catch(
+			console.error,
+		)
+		navigateToWorktrees()
+	}, [navigateToWorktrees])
 
 	/**
-	 * Check if a banner has been dismissed based on its version
+	 * Check if a banner has been dismissed based on its ID or legacy version
 	 */
 	const isBannerDismissed = useCallback(
 		(bannerId: string): boolean => {
-			// !! Do not keep tracking the banner versions like this. !!
+			// Check if banner is in the dismissed banners list (new approach)
+			if (
+				dismissedBanners?.some((dismissed: { bannerId: string; dismissedAt: number }) => dismissed.bannerId === bannerId)
+			) {
+				return true
+			}
+
+			// Legacy version-based tracking (deprecated)
 			if (bannerId.startsWith("info-banner")) {
 				return (lastDismissedInfoBannerVersion ?? 0) >= 1
 			}
@@ -66,7 +145,7 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 			}
 			return false
 		},
-		[lastDismissedInfoBannerVersion, lastDismissedModelBannerVersion, lastDismissedCliBannerVersion],
+		[dismissedBanners, lastDismissedInfoBannerVersion, lastDismissedModelBannerVersion, lastDismissedCliBannerVersion],
 	)
 
 	/**
@@ -106,7 +185,8 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 					break
 
 				case BannerActionType.SetModel: {
-					const modelId = action.arg || "anthropic/claude-opus-4.5"
+					const modelId = action.arg || "anthropic/claude-sonnet-4.5"
+					const initialModelTab = action.tab || "recommended"
 					handleFieldsChange({
 						planModeOpenRouterModelId: modelId,
 						actModeOpenRouterModelId: modelId,
@@ -115,7 +195,7 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 						planModeApiProvider: "cline",
 						actModeApiProvider: "cline",
 					})
-					setTimeout(() => setShowChatModelSelector(true), 10)
+					navigateToSettingsModelPicker({ targetSection: "api-config", initialModelTab })
 					break
 				}
 
@@ -124,6 +204,13 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 					break
 
 				case BannerActionType.ShowApiSettings:
+					if (action.arg) {
+						// Pre-select the provider before navigating
+						handleFieldsChange({
+							planModeApiProvider: action.arg as any,
+							actModeApiProvider: action.arg as any,
+						})
+					}
 					navigateToSettings("api-config")
 					break
 
@@ -141,7 +228,7 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 					console.warn("Unknown banner action:", action.action)
 			}
 		},
-		[handleFieldsChange, openRouterModels, setShowChatModelSelector, navigateToSettings],
+		[handleFieldsChange, openRouterModels, navigateToSettings, navigateToSettingsModelPicker],
 	)
 
 	/**
@@ -186,27 +273,80 @@ export const WelcomeSection: React.FC<WelcomeSectionProps> = ({
 
 		// Combine both sources: extension state banners first, then hardcoded banners
 		return [...extensionStateBanners, ...hardcodedBanners]
-	}, [bannerConfig, banners, clineUser, subagentsEnabled, handleBannerAction, handleBannerDismiss])
+	}, [bannerConfig, banners, clineUser, handleBannerAction, handleBannerDismiss])
 
 	return (
 		<div className="flex flex-col flex-1 w-full h-full p-0 m-0">
-			<WhatsNewModal onClose={handleCloseWhatsNewModal} open={showWhatsNewModal} version={version} />
+			<WhatsNewModal
+				onBannerAction={handleBannerAction}
+				onClose={handleCloseWhatsNewModal}
+				open={showWhatsNewModal}
+				version={version}
+				welcomeBanners={welcomeBanners}
+			/>
 			<div className="overflow-y-auto flex flex-col pb-2.5">
 				<HomeHeader shouldShowQuickWins={shouldShowQuickWins} />
 				{!showWhatsNewModal && (
 					<>
-						<div className="animate-fade-in">
-							<BannerCarousel banners={activeBanners} />
-						</div>
-						{!shouldShowQuickWins && taskHistory.length > 0 && (
-							<div className="animate-fade-in opacity-0">
-								<HistoryPreview showHistoryView={showHistoryView} />
+						<BannerCarousel banners={activeBanners} />
+						{!shouldShowQuickWins && taskHistory.length > 0 && <HistoryPreview showHistoryView={showHistoryView} />}
+						{/* Quick launch worktree button */}
+						{isGitRepo && worktreesEnabled?.featureFlag && worktreesEnabled?.user && (
+							<div className="flex flex-col items-center gap-3 mt-2 mb-4 px-5">
+								{/* TODO: Re-enable once worktree creation is stable
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<button
+											className="flex items-center gap-2 px-4 py-2 rounded-full border border-[var(--vscode-foreground)]/30 text-[var(--vscode-foreground)] bg-transparent hover:bg-[var(--vscode-list-hoverBackground)] active:opacity-80 text-sm font-medium cursor-pointer"
+											onClick={() => setShowCreateWorktreeModal(true)}
+											type="button">
+											<span className="codicon codicon-empty-window"></span>
+											New Worktree Window
+										</button>
+									</TooltipTrigger>
+									<TooltipContent side="top">
+										Create a new git worktree and open it in a separate window. Great for running parallel
+										Cline tasks.
+									</TooltipContent>
+								</Tooltip>
+								*/}
+								{currentWorktree && (
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<button
+												className="flex flex-col items-center gap-0.5 text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] cursor-pointer bg-transparent border-none p-1 rounded"
+												onClick={handleWorktreeClick}
+												type="button">
+												<div className="flex items-center gap-1.5 text-xs">
+													<GitBranch className="w-3 h-3 stroke-[2.5] flex-shrink-0" />
+													<span className="break-all text-center">
+														<span className="font-semibold">Current:</span>{" "}
+														{currentWorktree.branch || "detached HEAD"}
+													</span>
+												</div>
+												<span className="break-all text-center max-w-[300px]">
+													{currentWorktree.path}
+												</span>
+											</button>
+										</TooltipTrigger>
+										<TooltipContent side="bottom">
+											View and manage git worktrees. Great for running parallel Cline tasks.
+										</TooltipContent>
+									</Tooltip>
+								)}
 							</div>
 						)}
 					</>
 				)}
 			</div>
 			<SuggestedTasks shouldShowQuickWins={shouldShowQuickWins} />
+
+			{/* Quick launch worktree modal */}
+			<CreateWorktreeModal
+				onClose={() => setShowCreateWorktreeModal(false)}
+				open={showCreateWorktreeModal}
+				openAfterCreate={true}
+			/>
 		</div>
 	)
 }

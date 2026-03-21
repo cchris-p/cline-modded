@@ -2,6 +2,8 @@ import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import * as path from "path"
 import * as vscode from "vscode"
 import { DecorationController } from "@/hosts/vscode/DecorationController"
+import { NotebookDiffView } from "@/hosts/vscode/NotebookDiffView"
+import { Logger } from "@/shared/services/Logger"
 import { arePathsEqual } from "@/utils/path"
 
 export const DIFF_VIEW_URI_SCHEME = "cline-diff"
@@ -11,6 +13,7 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 
 	private fadedOverlayController?: DecorationController
 	private activeLineController?: DecorationController
+	private notebookDiffView?: NotebookDiffView
 
 	override async openDiffEditor(): Promise<void> {
 		if (!this.absolutePath) {
@@ -28,7 +31,7 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 				try {
 					await vscode.window.tabGroups.close(tab)
 				} catch (error) {
-					console.warn("Tab close retry failed:", error.message)
+					Logger.warn("Tab close retry failed:", error.message)
 				}
 			}
 			this.documentWasOpen = true
@@ -63,9 +66,9 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 				})
 				vscode.commands.executeCommand(
 					"vscode.diff",
-					vscode.Uri.from({
-						scheme: DIFF_VIEW_URI_SCHEME,
-						path: fileName,
+					vscode.Uri.parse(
+						`${DIFF_VIEW_URI_SCHEME}:${fileName.replace(/%/g, "%25").replace(/#/g, "%23").replace(/\?/g, "%3F")}`,
+					).with({
 						query: Buffer.from(this.originalContent ?? "").toString("base64"),
 					}),
 					uri,
@@ -96,6 +99,7 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 		if (!this.activeDiffEditor || !this.activeDiffEditor.document) {
 			throw new Error("User closed text editor, unable to edit file...")
 		}
+
 		// Place cursor at the beginning of the diff editor to keep it out of the way of the stream animation
 		const beginningOfDocument = new vscode.Position(0, 0)
 		this.activeDiffEditor.selection = new vscode.Selection(beginningOfDocument, beginningOfDocument)
@@ -208,16 +212,50 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 				try {
 					await vscode.window.tabGroups.close(tab)
 				} catch (error) {
-					console.warn("Tab close retry failed:", error.message)
+					Logger.warn("Tab close retry failed:", error.message)
 				}
 			}
 		}
 	}
 
 	protected override async resetDiffView(): Promise<void> {
+		if (this.notebookDiffView) {
+			await this.notebookDiffView.cleanup()
+			this.notebookDiffView = undefined
+		}
+
 		this.activeDiffEditor = undefined
 		this.fadedOverlayController = undefined
 		this.activeLineController = undefined
+	}
+
+	protected override async switchToSpecializedEditor(): Promise<void> {
+		if (!this.isNotebookFile() || !this.activeDiffEditor || !this.absolutePath) {
+			return
+		}
+
+		try {
+			this.notebookDiffView = new NotebookDiffView()
+			await this.notebookDiffView.open(this.absolutePath, this.activeDiffEditor)
+		} catch (error) {
+			Logger.error("Failed to create notebook diff view:", error)
+		}
+	}
+
+	override async showFile(absolutePath: string): Promise<void> {
+		const uri = vscode.Uri.file(absolutePath)
+
+		if (this.isNotebookFile()) {
+			// Open with Jupyter notebook editor if available
+			const jupyterExtension = vscode.extensions.getExtension("ms-toolsai.jupyter")
+			if (jupyterExtension) {
+				await vscode.commands.executeCommand("vscode.openWith", uri, "jupyter-notebook")
+				return
+			}
+		}
+
+		// Default: open as text
+		await vscode.window.showTextDocument(uri, { preview: false })
 	}
 }
 

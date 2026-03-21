@@ -6,10 +6,11 @@ import { getRequestRegistry, type StreamingResponseHandler } from "@/core/contro
 import { setWelcomeViewCompleted } from "@/core/controller/state/setWelcomeViewCompleted"
 import { HostProvider } from "@/hosts/host-provider"
 import { telemetryService } from "@/services/telemetry"
+import { Logger } from "@/shared/services/Logger"
 import { openExternal } from "@/utils/env"
+import { BannerService } from "../banner/BannerService"
 import { AuthInvalidTokenError, AuthNetworkError } from "../error/ClineError"
 import { featureFlagsService } from "../feature-flags"
-import { Logger } from "../logging/Logger"
 import { ClineAuthProvider } from "./providers/ClineAuthProvider"
 import { LogoutReason } from "./types"
 
@@ -63,7 +64,7 @@ export interface ClineAccountOrganization {
 
 export class AuthService {
 	protected static instance: AuthService | null = null
-	protected _authenticated: boolean = false
+	protected _authenticated = false
 	protected _clineAuthInfo: ClineAuthInfo | null = null
 	protected _provider: ClineAuthProvider
 	protected _activeAuthStatusUpdateHandlers = new Set<StreamingResponseHandler<AuthState>>()
@@ -88,7 +89,7 @@ export class AuthService {
 	public static getInstance(controller?: Controller): AuthService {
 		if (!AuthService.instance) {
 			if (!controller) {
-				console.warn("Extension context was not provided to AuthService.getInstance, using default context")
+				Logger.warn("Extension context was not provided to AuthService.getInstance, using default context")
 				controller = {} as Controller
 			}
 			if (process.env.E2E_TEST) {
@@ -99,6 +100,8 @@ export class AuthService {
 			} else {
 				AuthService.instance = new AuthService(controller)
 			}
+			// Initialize BannerService after AuthService is created
+			BannerService.initialize(controller)
 		}
 		if (controller !== undefined && AuthService.instance) {
 			AuthService.instance.controller = controller
@@ -255,8 +258,7 @@ export class AuthService {
 			return String.create({ value: "Already authenticated" })
 		}
 
-		const callbackHost = await HostProvider.get().getCallbackUrl()
-		const callbackUrl = `${callbackHost}/auth`
+		const callbackUrl = await HostProvider.get().getCallbackUrl("/auth")
 
 		const authUrl = await this._provider.getAuthRequest(callbackUrl)
 		const authUrlString = authUrl.toString()
@@ -274,7 +276,7 @@ export class AuthService {
 			this.destroyTokens()
 			this.sendAuthStatusUpdate()
 		} catch (error) {
-			console.error("Error signing out:", error)
+			Logger.error("Error signing out:", error)
 			throw error
 		}
 	}
@@ -287,7 +289,7 @@ export class AuthService {
 			telemetryService.captureAuthSucceeded(this._provider.name)
 			await setWelcomeViewCompleted(this._controller, { value: true })
 		} catch (error) {
-			console.error("Error signing in with custom token:", error)
+			Logger.error("Error signing in with custom token:", error)
 			telemetryService.captureAuthFailed(this._provider.name)
 			throw error
 		} finally {
@@ -315,13 +317,13 @@ export class AuthService {
 				this._authenticated = true
 				await this.sendAuthStatusUpdate()
 			} else {
-				console.warn("No user found after restoring auth token")
+				Logger.warn("No user found after restoring auth token")
 				this._authenticated = false
 				this._clineAuthInfo = null
 				telemetryService.captureAuthLoggedOut(this._provider.name, LogoutReason.ERROR_RECOVERY)
 			}
 		} catch (error) {
-			console.error("Error restoring auth token:", error)
+			Logger.error("Error restoring auth token:", error)
 			this._authenticated = false
 			this._clineAuthInfo = null
 			telemetryService.captureAuthLoggedOut(this._provider.name, LogoutReason.ERROR_RECOVERY)
@@ -369,7 +371,7 @@ export class AuthService {
 		try {
 			await this.sendAuthStatusUpdate()
 		} catch (error) {
-			console.error("Error sending initial auth status:", error)
+			Logger.error("Error sending initial auth status:", error)
 			// Remove the subscription if there was an error
 			this._activeAuthStatusUpdateHandlers.delete(responseStream)
 			this._handlerToController.delete(responseStream)
@@ -396,7 +398,7 @@ export class AuthService {
 					false, // Not the last message
 				)
 			} catch (error) {
-				console.error("Error sending authStatusUpdate event:", error)
+				Logger.error("Error sending authStatusUpdate event:", error)
 				// Remove the subscription if there was an error
 				this._activeAuthStatusUpdateHandlers.delete(responseStream)
 				this._handlerToController.delete(responseStream)
@@ -404,6 +406,7 @@ export class AuthService {
 		})
 
 		await Promise.all(streamSends)
+
 		// Identify the user in telemetry if available
 		if (this._clineAuthInfo?.userInfo?.id) {
 			telemetryService.identifyAccount(this._clineAuthInfo.userInfo)
@@ -413,6 +416,11 @@ export class AuthService {
 			// Poll feature flags for unauthenticated state
 			await featureFlagsService.poll(null)
 		}
+
+		// Update banners based on new auth token
+		BannerService.onAuthUpdate(this._clineAuthInfo?.userInfo?.id || null).catch((error) => {
+			Logger.error("[AuthService] Banner update failed", error)
+		})
 
 		// Update state in webviews once per unique controller
 		await Promise.all(Array.from(uniqueControllers).map((c) => c.postStateToWebview()))

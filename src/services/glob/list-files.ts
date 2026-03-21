@@ -1,8 +1,10 @@
 import { workspaceResolver } from "@core/workspace"
+import { isDirectory } from "@utils/fs"
 import { arePathsEqual } from "@utils/path"
 import { globby, Options } from "globby"
 import * as os from "os"
 import * as path from "path"
+import { Logger } from "@/shared/services/Logger"
 
 // Constants
 const DEFAULT_IGNORE_DIRECTORIES = [
@@ -66,8 +68,13 @@ export async function listFiles(dirPath: string, recursive: boolean, limit: numb
 		return [[], false]
 	}
 
+	// globby requires cwd to point to a directory
+	if (!(await isDirectory(absolutePath))) {
+		return [[], false]
+	}
+
 	const options: Options = {
-		cwd: dirPath,
+		cwd: absolutePath,
 		dot: true, // do not ignore hidden files/directories
 		absolute: true,
 		markDirectories: true, // Append a / on any directories matched
@@ -127,7 +134,7 @@ async function globbyLevelByLevel(limit: number, options?: Options) {
 	try {
 		return await Promise.race([globbingProcess(), timeoutPromise])
 	} catch (_error) {
-		console.warn("Globbing timed out, returning partial results")
+		Logger.warn("Globbing timed out, returning partial results")
 		return Array.from(results)
 	}
 }

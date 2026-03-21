@@ -1,5 +1,6 @@
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import * as fs from "fs/promises"
+import { Logger } from "@/shared/services/Logger"
 
 /**
  * A file-system-based implementation of DiffViewProvider that performs direct file operations
@@ -109,11 +110,13 @@ export class FileEditProvider extends DiffViewProvider {
 		}
 
 		try {
-			// Write the content to the file using fs
-			await fs.writeFile(this.absolutePath, this.documentContent, { encoding: this.fileEncoding as BufferEncoding })
+			// Always use UTF-8 for writing - it's the modern standard and handles all characters
+			// including emojis. The detected fileEncoding was used for reading to preserve
+			// compatibility, but writing as UTF-8 ensures no character corruption.
+			await fs.writeFile(this.absolutePath, this.documentContent, { encoding: "utf8" })
 			return true
 		} catch (error) {
-			console.error(`Failed to save document to ${this.absolutePath}:`, error)
+			Logger.error(`Failed to save document to ${this.absolutePath}:`, error)
 			return false
 		}
 	}

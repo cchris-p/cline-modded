@@ -1,5 +1,6 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
+import { ApiProvider } from "@/shared/api"
 import {
 	ClineAssistantRedactedThinkingBlock,
 	ClineAssistantThinkingBlock,
@@ -9,6 +10,7 @@ import {
 	ClineTextContentBlock,
 	ClineUserToolResultContentBlock,
 } from "@/shared/messages/content"
+import { Logger } from "@/shared/services/Logger"
 
 // OpenAI API has a maximum tool call ID length of 40 characters
 const MAX_TOOL_CALL_ID_LENGTH = 40
@@ -26,19 +28,24 @@ function isOpenAIResponseToolId(callId: string): boolean {
 
 /**
  * Transforms a tool ID to a consistent format for OpenAI's Chat Completions API.
+ * NOTE: We do not want to transform tool IDs for non-OpenAI providers that may have different requirements.
  * This function MUST be used for both tool_calls[].id (assistant) and tool_call_id (tool result)
  * to ensure they match - otherwise OpenAI will reject the request with:
  * "Invalid parameter: 'tool_call_id' of 'xxx' not found in 'tool_calls' of previous message."
  *
  * @param toolId - The original tool ID from Cline/Anthropic format
+ * @param provider - The API provider that the OpenAI formatted messages will be sent to
  * @returns The transformed ID suitable for OpenAI API
  */
-function transformToolCallId(toolId: string): string {
+function transformToolCallIdForNativeApi(toolId: string, provider?: ApiProvider): string {
 	// OpenAI Responses API uses "fc_" prefix with 53 char length
 	// Convert these to "call_" prefix format for Chat Completions API
 	if (isOpenAIResponseToolId(toolId)) {
 		// Use the last 33 chars + "call_" (5 chars) to stay under the 40-char limit.
 		return `call_${toolId.slice(toolId.length - (MAX_TOOL_CALL_ID_LENGTH - 5))}`
+	}
+	if (provider !== "openai-native") {
+		return toolId
 	}
 	// Ensure ID doesn't exceed max length
 	if (toolId.length > MAX_TOOL_CALL_ID_LENGTH) {
@@ -54,10 +61,12 @@ function transformToolCallId(toolId: string): string {
  * into OpenAI's expected message structure, including tool_calls and tool_call_id fields.
  *
  * @param anthropicMessages - Array of ClineStorageMessage objects to be converted
+ * @param provider - Optional parameter to indicate the API provider, which may affect ID transformation logic
  * @returns Array of OpenAI.Chat.ChatCompletionMessageParam objects
  */
 export function convertToOpenAiMessages(
 	anthropicMessages: Omit<ClineStorageMessage, "modelInfo">[],
+	provider?: ApiProvider,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
 	const openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
@@ -119,7 +128,7 @@ export function convertToOpenAiMessages(
 						role: "tool",
 						// The tool_call_id must match the id used in the assistant's tool_calls array.
 						// Use the same transformation logic as tool_calls to ensure IDs match.
-						tool_call_id: transformToolCallId(toolMessage.tool_use_id),
+						tool_call_id: transformToolCallIdForNativeApi(toolMessage.tool_use_id, provider),
 						content: content,
 					})
 				})
@@ -232,7 +241,7 @@ export function convertToOpenAiMessages(
 
 					return {
 						// Use the same transformation as tool_call_id to ensure IDs match
-						id: transformToolCallId(toolId),
+						id: transformToolCallIdForNativeApi(toolId, provider),
 						type: "function",
 						function: {
 							name: toolMessage.name,
@@ -424,7 +433,7 @@ export function convertToAnthropicMessage(completion: OpenAI.Chat.Completions.Ch
 						try {
 							parsedInput = JSON.parse(toolCall.function?.arguments || "{}")
 						} catch (error) {
-							console.error("Failed to parse tool arguments:", error)
+							Logger.error("Failed to parse tool arguments:", error)
 						}
 						return {
 							type: "tool_use",
@@ -439,7 +448,7 @@ export function convertToAnthropicMessage(completion: OpenAI.Chat.Completions.Ch
 			return anthropicMessage
 		}
 	} catch (error) {
-		console.error("Error converting OpenAI message to Anthropic format:", error)
+		Logger.error("Error converting OpenAI message to Anthropic format:", error)
 	}
 
 	return anthropicMessage

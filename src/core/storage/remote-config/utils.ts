@@ -1,17 +1,39 @@
 import { synchronizeRemoteRuleToggles } from "@core/context/instructions/user-instructions/rule-helpers"
-import { RemoteConfig } from "@shared/remote-config/schema"
-import { GlobalStateAndSettings, RemoteConfigFields } from "@shared/storage/state-keys"
+import type { RemoteConfig, S3AccessKeySettings } from "@shared/remote-config/schema"
+import { ConfiguredAPIKeys, GlobalStateAndSettings, RemoteConfigFields } from "@shared/storage/state-keys"
 import { AuthService } from "@/services/auth/AuthService"
-import { Logger } from "@/services/logging/Logger"
-import { getTelemetryService, telemetryService } from "@/services/telemetry"
+import { getDistinctId } from "@/services/logging/distinctId"
+import { type McpHub } from "@/services/mcp/McpHub"
+import { telemetryService } from "@/services/telemetry"
 import { OpenTelemetryClientProvider } from "@/services/telemetry/providers/opentelemetry/OpenTelemetryClientProvider"
 import { OpenTelemetryTelemetryProvider } from "@/services/telemetry/providers/opentelemetry/OpenTelemetryTelemetryProvider"
 import { type TelemetryService } from "@/services/telemetry/TelemetryService"
 import { ApiProvider } from "@/shared/api"
 import { isOpenTelemetryConfigValid, remoteConfigToOtelConfig } from "@/shared/services/config/otel-config"
+import { Logger } from "@/shared/services/Logger"
+import { syncWorker } from "@/shared/services/worker/sync"
+import { BlobStoreSettings } from "@/shared/storage"
 import { ensureSettingsDirectoryExists } from "../disk"
 import { StateManager } from "../StateManager"
 import { syncRemoteMcpServersToSettings } from "./syncRemoteMcpServers"
+
+function accessSettingsToBlobStorage(type: BlobStoreSettings["adapterType"], settings: S3AccessKeySettings): BlobStoreSettings {
+	return {
+		adapterType: type,
+		accessKeyId: settings.accessKeyId,
+		secretAccessKey: settings.secretAccessKey,
+		region: settings.region,
+		bucket: settings.bucket,
+		endpoint: settings.endpoint,
+		accountId: settings.accountId,
+		intervalMs: settings.intervalMs,
+		maxRetries: settings.maxRetries,
+		batchSize: settings.batchSize,
+		maxQueueSize: settings.maxQueueSize,
+		maxFailedAgeMs: settings.maxFailedAgeMs,
+		backfillEnabled: settings.backfillEnabled,
+	}
+}
 
 /**
  * Transforms RemoteConfig schema to RemoteConfigFields shape
@@ -90,9 +112,14 @@ export function transformRemoteConfigToStateShape(remoteConfig: RemoteConfig): P
 	if (remoteConfig.openTelemetryOtlpHeaders !== undefined) {
 		transformed.openTelemetryOtlpHeaders = remoteConfig.openTelemetryOtlpHeaders
 	}
+	if (remoteConfig.openTelemetryOtlpMetricsHeaders !== undefined) {
+		transformed.otlpMetricsHeaders = remoteConfig.openTelemetryOtlpMetricsHeaders
+	}
+	if (remoteConfig.openTelemetryOtlpLogsHeaders !== undefined) {
+		transformed.otlpLogsHeaders = remoteConfig.openTelemetryOtlpLogsHeaders
+	}
 
 	// Map provider settings
-
 	const providers: ApiProvider[] = []
 
 	// Map OpenAiCompatible provider settings
@@ -174,6 +201,17 @@ export function transformRemoteConfigToStateShape(remoteConfig: RemoteConfig): P
 		}
 	}
 
+	const anthropicSettings = remoteConfig.providerSettings?.Anthropic
+	if (anthropicSettings) {
+		transformed.planModeApiProvider = "anthropic"
+		transformed.actModeApiProvider = "anthropic"
+		providers.push("anthropic")
+
+		if (anthropicSettings.baseUrl) {
+			transformed.anthropicBaseUrl = anthropicSettings.baseUrl
+		}
+	}
+
 	// This line needs to stay here, it is order dependent on the above code checking the configured providers
 	if (providers.length > 0) {
 		transformed.remoteConfiguredProviders = providers
@@ -187,10 +225,19 @@ export function transformRemoteConfigToStateShape(remoteConfig: RemoteConfig): P
 		transformed.remoteGlobalWorkflows = remoteConfig.globalWorkflows
 	}
 
+	if (remoteConfig.enterpriseTelemetry?.promptUploading) {
+		const promptUplaoding = remoteConfig.enterpriseTelemetry.promptUploading
+		if (promptUplaoding.type === "s3_access_keys" && promptUplaoding.s3AccessSettings) {
+			transformed.blobStoreConfig = accessSettingsToBlobStorage("s3", promptUplaoding.s3AccessSettings)
+		} else if (promptUplaoding.type === "r2_access_keys" && promptUplaoding.r2AccessSettings) {
+			transformed.blobStoreConfig = accessSettingsToBlobStorage("r2", promptUplaoding.r2AccessSettings)
+		}
+	}
+
 	return transformed
 }
 
-const REMOTE_CONFIG_OTEL_PROVIDER_ID = "OpenTelemetryRemoteConfiguredProvider"
+export const REMOTE_CONFIG_OTEL_PROVIDER_ID = "OpenTelemetryRemoteConfiguredProvider"
 async function applyRemoteOTELConfig(transformed: Partial<RemoteConfigFields>, telemetryService: TelemetryService) {
 	try {
 		const otelConfig = remoteConfigToOtelConfig(transformed)
@@ -207,7 +254,20 @@ async function applyRemoteOTELConfig(transformed: Partial<RemoteConfigFields>, t
 			}
 		}
 	} catch (err) {
-		console.error("[REMOTE CONFIG DEBUG] Failed to apply remote OTEL config", err)
+		Logger.error("[REMOTE CONFIG DEBUG] Failed to apply remote OTEL config", err)
+	}
+}
+
+async function applyRemoteSyncQueueConfig(transformed: Partial<RemoteConfigFields>) {
+	try {
+		const blobStoreConfig = transformed.blobStoreConfig
+		if (!blobStoreConfig) {
+			return
+		}
+
+		syncWorker().init({ ...blobStoreConfig, userDistinctId: getDistinctId() })
+	} catch (err) {
+		Logger.error("[REMOTE CONFIG DEBUG] Failed to apply remote sync queue config", err)
 	}
 }
 
@@ -231,17 +291,14 @@ export function clearRemoteConfig() {
 /**
  * Applies remote config to the StateManager's remote config cache
  * @param remoteConfig The remote configuration object to apply
- * @param settingsDirectoryPath Path to the settings directory
- * @param mcpHub Optional McpHub instance to prevent watcher triggers during sync
+ * @param mcpHub McpHub instance to prevent watcher triggers during sync
  */
 export async function applyRemoteConfig(
-	remoteConfig?: RemoteConfig,
-	settingsDirectoryPath?: string,
-	mcpHub?: any,
+	remoteConfig: RemoteConfig,
+	configuredKeys: ConfiguredAPIKeys,
+	mcpHub: McpHub,
 ): Promise<void> {
 	const stateManager = StateManager.get()
-	const telemetryService = await getTelemetryService()
-
 	// If no remote config provided, clear the cache and relevant state
 	if (!remoteConfig) {
 		clearRemoteConfig()
@@ -270,34 +327,49 @@ export async function applyRemoteConfig(
 	stateManager.clearRemoteConfig()
 	telemetryService.removeProvider(REMOTE_CONFIG_OTEL_PROVIDER_ID)
 
+	// If the existing configured provider is valid, don't update it
+	const apiConfiguration = stateManager.getApiConfiguration()
+	if (isProviderValid(apiConfiguration.actModeApiProvider, transformed)) {
+		transformed.actModeApiProvider = apiConfiguration.actModeApiProvider
+	}
+	if (isProviderValid(apiConfiguration.planModeApiProvider, transformed)) {
+		transformed.planModeApiProvider = apiConfiguration.planModeApiProvider
+	}
+
 	// Populate remote config cache with transformed values
 	for (const [key, value] of Object.entries(transformed)) {
 		stateManager.setRemoteConfigField(key as keyof RemoteConfigFields, value)
 	}
+	stateManager.setRemoteConfigField("configuredApiKeys", configuredKeys)
 
 	// Restore previousRemoteMCPServers across cache clears
 	if (previousRemoteMCPServers !== undefined) {
 		stateManager.setRemoteConfigField("previousRemoteMCPServers", previousRemoteMCPServers)
 	}
 
-	// Sync remote MCP servers to settings file (AFTER cache is populated, so sync can read previous state)
-	if (remoteConfig.remoteMCPServers !== undefined) {
-		try {
-			// Get settings directory path - use provided path or get it from disk helper
-			const settingsPath = settingsDirectoryPath || (await ensureSettingsDirectoryExists())
-			await syncRemoteMcpServersToSettings(remoteConfig.remoteMCPServers, settingsPath, mcpHub)
-			// Store current remote servers list for next sync to detect removals
-			stateManager.setRemoteConfigField("previousRemoteMCPServers", remoteConfig.remoteMCPServers)
-		} catch (error) {
-			console.error("[RemoteConfig] Failed to sync remote MCP servers to settings:", error)
-			// Continue with other config application even if MCP sync fails
-		}
+	applyRemoteSyncQueueConfig(transformed)
+
+	// Always sync remote MCP servers when remote config is active.
+	// The sync function uses the persistent `remoteConfigured` marker in the settings file
+	// to identify which servers were added by remote config. This means:
+	// - Servers no longer in remoteMCPServers but marked `remoteConfigured: true` get removed
+	// - New servers get added with the `remoteConfigured: true` marker
+	// - No dependency on in-memory state that would be lost across restarts
+	try {
+		const serversToSync = remoteConfig.remoteMCPServers ?? []
+		const settingsPath = await ensureSettingsDirectoryExists()
+		await syncRemoteMcpServersToSettings(serversToSync, settingsPath, mcpHub)
+		stateManager.setRemoteConfigField("previousRemoteMCPServers", serversToSync)
+	} catch (error) {
+		Logger.error("[RemoteConfig] Failed to sync remote MCP servers to settings:", error)
+		// Continue with other config application even if MCP sync fails
 	}
 	await applyRemoteOTELConfig(transformed, telemetryService)
 }
 
-const isProviderValid = (provider?: ApiProvider) => {
-	const remoteConfiguredProviders = StateManager.get().getRemoteConfigSettings().remoteConfiguredProviders
+const isProviderValid = (provider?: ApiProvider, remoteConfig?: Partial<RemoteConfigFields>) => {
+	const remoteConfiguredProviders =
+		remoteConfig?.remoteConfiguredProviders ?? StateManager.get().getRemoteConfigSettings().remoteConfiguredProviders
 	if (!remoteConfiguredProviders || !remoteConfiguredProviders.length) {
 		return true
 	}

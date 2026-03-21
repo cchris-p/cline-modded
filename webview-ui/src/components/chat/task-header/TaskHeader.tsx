@@ -26,6 +26,7 @@ interface TaskHeaderProps {
 	totalCost: number
 	lastApiReqTotalTokens?: number
 	lastProgressMessageText?: string
+	showFocusChainPlaceholder?: boolean
 	onClose: () => void
 	onSendMessage?: (command: string, files: string[], images: string[]) => void
 }
@@ -41,6 +42,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 	totalCost,
 	lastApiReqTotalTokens,
 	lastProgressMessageText,
+	showFocusChainPlaceholder,
 	onClose,
 	onSendMessage,
 }) => {
@@ -48,6 +50,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 		apiConfiguration,
 		currentTaskItem,
 		checkpointManagerErrorMessage,
+		focusChainSettings,
 		navigateToSettings,
 		mode,
 		expandTaskHeader: isTaskExpanded,
@@ -95,7 +98,10 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 			modeFields.apiProvider === "openai" &&
 			modeFields.openAiModelInfo?.inputPrice &&
 			modeFields.openAiModelInfo?.outputPrice) ||
-		(modeFields.apiProvider !== "vscode-lm" && modeFields.apiProvider !== "ollama" && modeFields.apiProvider !== "lmstudio")
+		(modeFields.apiProvider !== "vscode-lm" &&
+			modeFields.apiProvider !== "ollama" &&
+			modeFields.apiProvider !== "lmstudio" &&
+			modeFields.apiProvider !== "openai-codex") // Subscription-based, no per-token costs
 
 	// Event handlers
 	const toggleTaskExpanded = useCallback(() => setIsTaskExpanded(!isTaskExpanded), [setIsTaskExpanded, isTaskExpanded])
@@ -218,7 +224,13 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 			</div>
 
 			{/* Display Focus Chain To-Do List */}
-			<FocusChain currentTaskItemId={currentTaskItem?.id} lastProgressMessageText={lastProgressMessageText} />
+			{focusChainSettings.enabled && (
+				<FocusChain
+					currentTaskItemId={currentTaskItem?.id}
+					lastProgressMessageText={lastProgressMessageText}
+					showPlaceholderWhenEmpty={showFocusChainPlaceholder}
+				/>
+			)}
 		</div>
 	)
 }

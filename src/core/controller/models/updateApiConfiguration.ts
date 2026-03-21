@@ -3,6 +3,7 @@ import { convertProtoToApiProvider } from "@shared/proto-conversions/models/api-
 import { buildApiHandler } from "@/core/api"
 import { ApiHandlerOptions, ApiProvider } from "@/shared/api"
 import { UpdateApiConfigurationRequestNew } from "@/shared/proto/index.cline"
+import { Logger } from "@/shared/services/Logger"
 import { Secrets } from "@/shared/storage/state-keys"
 import type { Controller } from "../index"
 
@@ -140,9 +141,14 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 		// Update the task's API handler if there's an active task
 		if (controller.task) {
 			const currentMode = controller.stateManager.getGlobalSettingsKey("mode")
-			// Combine secrets and options for the API handler
-			const apiConfigForHandler = { ...secrets, ...options, ulid: controller.task.ulid }
-			controller.task.api = buildApiHandler(apiConfigForHandler, currentMode)
+			// Build updated config
+			controller.task.api = buildApiHandler(
+				{
+					...controller.stateManager.getApiConfiguration(),
+					ulid: controller.task.ulid,
+				},
+				currentMode,
+			)
 		}
 
 		// Post updated state to webview
@@ -150,7 +156,7 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 
 		return Empty.create()
 	} catch (error) {
-		console.error(`Failed to update API configuration: ${error}`)
+		Logger.error(`Failed to update API configuration: ${error}`)
 		throw error
 	}
 }

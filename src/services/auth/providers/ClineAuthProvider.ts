@@ -5,10 +5,10 @@ import { Controller } from "@/core/controller"
 import { HostProvider } from "@/hosts/host-provider"
 import { buildBasicClineHeaders } from "@/services/EnvUtils"
 import { AuthInvalidTokenError, AuthNetworkError } from "@/services/error/ClineError"
-import { Logger } from "@/services/logging/Logger"
 import { telemetryService } from "@/services/telemetry"
 import { CLINE_API_ENDPOINT } from "@/shared/cline/api"
 import { fetch, getAxiosSettings } from "@/shared/net"
+import { Logger } from "@/shared/services/Logger"
 import { type ClineAccountUserInfo, type ClineAuthInfo } from "../AuthService"
 import { parseJwtPayload } from "../oca/utils/utils"
 
@@ -387,8 +387,7 @@ export class ClineAuthProvider {
 	async signIn(controller: Controller, authorizationCode: string, provider: string): Promise<ClineAuthInfo | null> {
 		try {
 			// Get the callback URL that was used during the initial auth request
-			const callbackHost = await HostProvider.get().getCallbackUrl()
-			const callbackUrl = `${callbackHost}/auth`
+			const callbackUrl = await HostProvider.get().getCallbackUrl("/auth")
 
 			// Exchange the authorization code for tokens
 			const tokenUrl = new URL(CLINE_API_ENDPOINT.TOKEN_EXCHANGE, this.config.apiBaseUrl)
