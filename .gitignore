@@ -5,6 +5,8 @@ node_modules
 tmp
 .vscode-test/
 *.vsix
+bin/
+cli/bin/
 
 .DS_Store
 .idea
