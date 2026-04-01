@@ -22,6 +22,7 @@ import {
 import { sendPartialMessageEvent } from "@core/controller/ui/subscribeToPartialMessage"
 import { getHookModelContext } from "@core/hooks/hook-model-context"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
+import * as NotificationHook from "@core/hooks/notification-hook"
 import { executePreCompactHookWithCleanup, HookCancellationError, HookExecution } from "@core/hooks/precompact-executor"
 import { ClineIgnoreController } from "@core/ignore/ClineIgnoreController"
 import { parseMentions } from "@core/mentions"
@@ -771,12 +772,18 @@ export class Task {
 			// not a strict approval boundary that should force external "user_attention"
 			// handling. In auto-approve flows, command_output asks can still be emitted,
 			// so we intentionally skip Notification hook emission for this ask type.
-			await this.runNotificationHook({
-				event: "user_attention",
-				source: type,
-				message: text || "",
-				waitingForUserInput: true,
-			})
+			await NotificationHook.emitUserAttentionNotification(
+				{
+					messageStateHandler: this.messageStateHandler,
+					taskId: this.taskId,
+					hooksEnabled: getHooksEnabledSafe(this.stateManager.getGlobalSettingsKey("hooksEnabled")),
+					model: getHookModelContext(this.api, this.stateManager),
+				},
+				{
+					source: type,
+					message: text || "",
+				},
+			)
 		}
 
 		const shouldWakeOnAbort = type !== "resume_task" && type !== "resume_completed_task"
@@ -804,35 +811,6 @@ export class Task {
 		this.taskState.askResponseImages = undefined
 		this.taskState.askResponseFiles = undefined
 		return result
-	}
-
-	private async runNotificationHook(notification: {
-		event: string
-		source: string
-		message: string
-		waitingForUserInput: boolean
-	}): Promise<void> {
-		const hooksEnabled = getHooksEnabledSafe(this.stateManager.getGlobalSettingsKey("hooksEnabled"))
-		if (!hooksEnabled) {
-			return
-		}
-
-		try {
-			await executeHook({
-				hookName: "Notification",
-				hookInput: {
-					notification,
-				},
-				isCancellable: false,
-				say: async () => undefined,
-				messageStateHandler: this.messageStateHandler,
-				taskId: this.taskId,
-				hooksEnabled,
-				model: getHookModelContext(this.api, this.stateManager),
-			})
-		} catch (error) {
-			Logger.error("[Notification Hook] Failed (non-fatal):", error)
-		}
 	}
 
 	async handleWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[], files?: string[]) {
@@ -1920,7 +1898,16 @@ export class Task {
 
 		const globalClineRulesFilePath = await ensureRulesDirectoryExists()
 		const globalRules = await getGlobalClineRules(globalClineRulesFilePath, globalToggles, { evaluationContext })
-		const globalClineRulesFileInstructions = globalRules.instructions
+		let globalClineRulesFileInstructions = globalRules.instructions
+
+		// Inject Lazy Teammate Mode rules if enabled
+		const lazyTeammateModeEnabled = this.stateManager.getGlobalSettingsKey("lazyTeammateModeEnabled")
+		if (lazyTeammateModeEnabled) {
+			const { LAZY_TEAMMATE_RULES } = await import("@/core/context/instructions/lazy-teammate-rules")
+			globalClineRulesFileInstructions = globalClineRulesFileInstructions
+				? `${globalClineRulesFileInstructions}\n\n${LAZY_TEAMMATE_RULES}`
+				: LAZY_TEAMMATE_RULES
+		}
 
 		const localRules = await getLocalClineRules(this.cwd, localToggles, { evaluationContext })
 		const localClineRulesFileInstructions = localRules.instructions
@@ -2438,6 +2425,10 @@ export class Task {
 			}
 			this.taskState.consecutiveMistakeCount = 0
 			this.taskState.autoRetryAttempts = 0 // need to reset this if the user chooses to manually retry after the mistake limit is reached
+			// Reset loop detection state so it can re-arm if the model continues looping
+			this.taskState.consecutiveIdenticalToolCount = 0
+			this.taskState.lastToolName = ""
+			this.taskState.lastToolParams = ""
 		}
 
 		// get previous api req's index to check token usage and determine if we need to truncate conversation history
