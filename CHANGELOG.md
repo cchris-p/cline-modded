@@ -1,5 +1,36 @@
 # Changelog
 
+## [3.79.0]
+
+### Added
+
+- Add Claude Opus 4.7 model support
+- Add Azure Blob Storage as a storage provider
+- Add `globalSkills` to remote config
+- Inline value reuse in user-level remote-config discovery
+
+### Fixed
+
+- Fix cache reflection for Cline and Vercel API handlers
+- Fix stuck `command_output` ask when terminal command ends unexpectedly
+- Add `use_subagents` to system prompt for GLM, Hermes, and XS models
+- Fix action injection security risk
+
+### Changed
+
+- Remove deprecated evals tool
+
+## [3.78.0]
+
+### Added
+
+- Add a dedicated "Spend Limit Reached" error UI when spend caps are hit
+- Docs updates
+
+### Fixed
+
+- Show actual `read_file` line ranges in chat UI
+
 ## [3.77.0]
 
 ### Added

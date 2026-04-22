@@ -1,6 +1,7 @@
 import { ClineMessage } from "@shared/ExtensionMessage"
 import { memo } from "react"
 import CreditLimitError from "@/components/chat/CreditLimitError"
+import SpendLimitError from "@/components/chat/SpendLimitError"
 import { Button } from "@/components/ui/button"
 import { useClineAuth, useClineSignIn } from "@/context/ClineAuthContext"
 import { ClineError, ClineErrorType } from "../../../../src/services/error/ClineError"
@@ -47,6 +48,19 @@ const ErrorRow = memo(({ message, errorType, apiRequestFailedMessage, apiReqStre
 						)
 					}
 
+					if (clineError?.isErrorType(ClineErrorType.SpendLimit)) {
+						const d = clineError._error?.details
+						return (
+							<SpendLimitError
+								budgetPeriod={d?.budget_period}
+								limitUsd={d?.limit_usd}
+								message={d?.message || errorMessage}
+								resetsAt={d?.resets_at}
+								spentUsd={d?.spent_usd}
+							/>
+						)
+					}
+
 					if (clineError?.isErrorType(ClineErrorType.RateLimit)) {
 						return (
 							<p className="m-0 whitespace-pre-wrap text-error wrap-anywhere">
@@ -54,6 +68,10 @@ const ErrorRow = memo(({ message, errorType, apiRequestFailedMessage, apiReqStre
 								{requestId && <div>Request ID: {requestId}</div>}
 							</p>
 						)
+					}
+
+					if (clineError?.isErrorType(ClineErrorType.QuotaExceeded)) {
+						return <p className="m-0 whitespace-pre-wrap text-error wrap-anywhere">{errorMessage}</p>
 					}
 
 					if (clineError?.isErrorType(ClineErrorType.Auth) && isClineProvider) {

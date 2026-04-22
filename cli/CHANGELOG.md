@@ -1,5 +1,28 @@
 # cline
 
+## [2.15.0]
+
+### Added
+
+- Add Claude Opus 4.7 model support
+- Inline value reuse in user-level remote-config discovery
+- Add `globalSkills` to remote config
+
+### Fixed
+
+- Stabilize Windows CI test path handling
+
+## [2.14.0]
+
+### Added
+
+- Simplify unified `cline update` flow for `cline` and `kanban`
+- Docs updates
+
+### Fixed
+
+- Update Kanban migration view copy
+
 ## [2.12.0]
 
 ### Added
