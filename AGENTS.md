@@ -57,3 +57,26 @@ Mitigation:
 - Validate local CLI runtime before proposing extension-level fixes.
 - When `cline` fails to start, inspect recent logs under `~/.cline/logs` before changing aliases or env vars.
 - Treat `CLINE_CORE_PATH` overrides as an advanced/debug setting, not a default.
+
+---
+
+## Command Behavior Caveat (Critical)
+
+In this environment/workflow, do **not** rely on `cline version` for verification.
+
+- `cline version` may start an interactive CLI session and treat `version` as prompt text.
+- This can produce misleading behavior and should not be used as the primary version check in agent instructions.
+
+Primary version command (use this):
+
+- `$HOME/.cline/cli/bin/cline version`
+
+Optional advanced verification (only when needed):
+
+1. **Verify source parity with upstream**
+   - `git fetch upstream`
+   - `git rev-parse --short HEAD`
+   - `git rev-parse --short upstream/main`
+2. **Verify runtime commit matches source**
+   - compare the `Commit:` value from `$HOME/.cline/cli/bin/cline version`
+   - against `git rev-parse --short HEAD`
